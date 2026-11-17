@@ -95,6 +95,8 @@ The standard library also has helpers that puzzles need often:
 
 ## Writing solutions in Cheby
 
+[GUIDE.md](GUIDE.md) shows the patterns that puzzles need most often, each with code that runs: reading the input, counting groups, caching results by hand, and searching. In short:
+
 - **Repeat with recursion.** Cheby has no loops. Use `list::fold`, `function::iterate`, or a local recursive `fn`.
 - **Recurse deeply if you need to.** `cheby.toml` gives `main` a 1 GiB stack, so a flood fill over a large grid does not overflow it.
 - **Key grids by tuple.** `Map<(Int, Int), T>` and `Set<(Int, Int)>` work well for grids and visited sets.
