@@ -1,0 +1,223 @@
+//! The template's tool, run from the package root:
+//!
+//! - `cheby run -- new 5` writes `src/day05.cheby` from a skeleton, adds
+//!   it to `src/all.cheby`, and downloads the day's input and sample.
+//! - `cheby run -- fetch 5` downloads them again, keeping files that exist.
+//! - `cheby run -- sync` rewrites `src/all.cheby` from the `dayNN.cheby`
+//!   files in `src`.
+//!
+//! Each day is its own module with its own `main`, so `cheby run aoc::day05`
+//! compiles only that day, and `cheby run aoc::all` runs them all.
+
+import aoc::config
+import aoc::kit
+import std::env
+import std::file
+import std::int
+import std::io
+import std::list
+import std::result
+import std::string
+
+fn main() -> Result<Nil, kit::Error> {
+  case env::args() {
+    ["new", day] => with_day(day, new_day)
+    ["fetch", day] => with_day(day, fetch)
+    ["sync"] => sync()
+    _ => Err(kit::Usage(usage))
+  }
+}
+
+/// The tool's usage text.
+const usage: String = "usage: cheby run -- new DAY | fetch DAY | sync"
+
+/// Calls `action` with the day that `text` names, from 1 to 25.
+fn with_day(text: String, action: fn(Int) -> Result<Nil, kit::Error>) -> Result<Nil, kit::Error> {
+  case int::parse(text) {
+    Ok(day) when day >= 1 && day <= 25 => action(day)
+    _ => Err(kit::Usage(usage))
+  }
+}
+
+/// Writes the day's module unless it exists, rewrites `src/all.cheby`,
+/// and downloads the input and sample.
+fn new_day(day: Int) -> Result<Nil, kit::Error> {
+  let number = kit::padded(day)
+  let path = "src/day{number}.cheby"
+  use exists <- result::try(is_file(path))
+  use _ <- result::try(case exists {
+    True => {
+      io::println("{path} exists, so it is kept")
+      Ok(Nil)
+    }
+    False => {
+      use _ <- result::try(kit::save(path, skeleton(day)))
+      io::println("wrote {path}")
+      Ok(Nil)
+    }
+  })
+  use _ <- result::try(sync())
+  use _ <- result::try(fetch(day))
+  io::println("next: cheby run aoc::day{number} -- --sample")
+  Ok(Nil)
+}
+
+/// Downloads the day's input and its sample into `inputs/`, keeping files
+/// that exist. A failed download is reported and does not stop the tool,
+/// since a puzzle may not be open yet.
+fn fetch(day: Int) -> Result<Nil, kit::Error> {
+  use _ <- result::try(
+    file::create_dir_all("inputs")
+    |> result::map_error(_, kit::FileFailed("inputs", _)),
+  )
+  let input_path = kit::input_path(day)
+  report(input_path, kit::input(day))
+  let sample_path = kit::sample_path(day)
+  use exists <- result::try(is_file(sample_path))
+  case exists {
+    True => io::println("{sample_path} exists, so it is kept")
+    False => {
+      let saved = kit::download_sample(day)
+        |> result::try(_, fn(text) { kit::save(sample_path, text) })
+      report(sample_path, saved)
+    }
+  }
+  Ok(Nil)
+}
+
+/// Prints whether a download into `path` worked.
+fn report<T>(path: String, outcome: Result<T, kit::Error>) {
+  case outcome {
+    Ok(_) => io::println("{path} is ready")
+    Err(reason) => io::eprintln("{path} is not ready: {reason}")
+  }
+}
+
+/// Whether `path` is an existing file.
+fn is_file(path: String) -> Result<Bool, kit::Error> {
+  case file::info(path) {
+    Ok(entry) => Ok(file::is_file(entry))
+    Err(reason) => case io::is_not_found(reason) {
+      True => Ok(False)
+      False => Err(kit::FileFailed(path, reason))
+    }
+  }
+}
+
+/// Rewrites `src/all.cheby` to run every `src/dayNN.cheby` in order.
+fn sync() -> Result<Nil, kit::Error> {
+  use names <- result::try(
+    file::list_dir("src")
+    |> result::map_error(_, kit::FileFailed("src", _)),
+  )
+  let days = names
+    |> list::filter_map(_, day_of_file)
+    |> list::sort
+  use _ <- result::try(kit::save("src/all.cheby", all_module(days)))
+  let count = case list::length(days) {
+    1 => "1 day"
+    n => "{n} days"
+  }
+  io::println("src/all.cheby runs {count}")
+  Ok(Nil)
+}
+
+/// The day of a file named like `day05.cheby`.
+fn day_of_file(name: String) -> Option<Int> {
+  case string::length(name) == 11 && string::starts_with(name, "day") {
+    False => None
+    True => case string::ends_with(name, ".cheby") {
+      False => None
+      True => int::parse(string::slice(name, 3, 5))
+        |> result::to_option
+    }
+  }
+}
+
+/// The text of `src/all.cheby` for `days`, in the form `cheby fmt` gives.
+fn all_module(days: List<Int>) -> String {
+  let imports = list::map(days, fn(day) {
+    let number = kit::padded(day)
+    "import aoc::day{number}"
+  })
+  let entries = list::map(days, fn(day) {
+    let number = kit::padded(day)
+    "kit::entry({day}, day{number}::part1, day{number}::part2)"
+  })
+  // `cheby fmt` keeps the list on one line when it fits in 100 columns.
+  let one_line = "  kit::run_all([" + string::join(entries, ", ") + "])"
+  let calls = case string::length(one_line) <= 100 {
+    True => [one_line]
+    False => {
+      let lines = list::map(entries, fn(entry) { "    " + entry + "," })
+      list::append(["  kit::run_all(["], list::push(lines, "  ])"))
+    }
+  }
+  let header = [
+    "//! Runs every day on its real input, with timings: `cheby run aoc::all`.",
+    "//! `cheby run -- new N` and `cheby run -- sync` rewrite this file.",
+    "",
+  ]
+  let opening = ["import aoc::kit", "", "fn main() -> Result<Nil, kit::Error> \{"]
+  [header, imports, opening, calls, ["}", ""]]
+  |> list::flatten
+  |> string::join(_, "\n")
+}
+
+/// The first text of a day's module.
+fn skeleton(day: Int) -> String {
+  let year = config::year
+  r#"//! Advent of Code YEAR, day DAY.
+
+import aoc::kit
+
+/// Part 1.
+fn part1(input: String) -> Int {
+  todo as "day DAY, part 1"
+}
+
+/// Part 2.
+fn part2(input: String) -> Int {
+  todo as "day DAY, part 2"
+}
+
+fn main() -> Result<Nil, kit::Error> {
+  kit::run(DAY, part1, part2)
+}
+
+// `cheby test --module aoc::dayNN` checks the parts on the sample in
+// `inputs/dayNN.sample.txt`. Put the puzzle's answers for the sample here.
+
+test "part 1 on the sample" {
+  let assert Ok(sample) = kit::sample(DAY)
+  assert part1(sample) == 0
+}
+
+test "part 2 on the sample" {
+  let assert Ok(sample) = kit::sample(DAY)
+  assert part2(sample) == 0
+}
+"#
+  |> string::replace(_, "YEAR", int::show(year))
+  |> string::replace(_, "dayNN", "day" + kit::padded(day))
+  |> string::replace(_, "DAY", int::show(day))
+}
+
+test "day_of_file reads two-digit day modules" {
+  assert day_of_file("day05.cheby") == Some(5)
+  assert day_of_file("day25.cheby") == Some(25)
+  assert day_of_file("main.cheby") == None
+  assert day_of_file("day5.cheby") == None
+  assert day_of_file("dayxx.cheby") == None
+}
+
+test "all_module lists the days in order" {
+  let empty = all_module([])
+  assert string::contains(empty, "import aoc::kit\n\nfn main() -> Result<Nil, kit::Error> \{\n")
+  assert string::ends_with(empty, "  kit::run_all([])\n}\n")
+  let text = all_module([1, 12])
+  assert string::contains(text, "import aoc::day01\nimport aoc::day12\nimport aoc::kit\n")
+  assert string::contains(text, "    kit::entry(12, day12::part1, day12::part2),\n")
+  let single = all_module([7])
+  assert string::contains(single, "  kit::run_all([kit::entry(7, day07::part1, day07::part2)])\n")
+}

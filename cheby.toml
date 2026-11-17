@@ -1,0 +1,7 @@
+name = "aoc"
+version = "0.1.0"
+description = "Advent of Code in Cheby"
+targets = ["native"]
+
+[runtime]
+main-stack = "1GiB"

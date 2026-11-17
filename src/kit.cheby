@@ -1,0 +1,366 @@
+//! Runs a day's solution: finds its input, downloading it on first use,
+//! times each part and prints the answers, or submits one.
+//!
+//! A day's `main` is `kit::run(5, part1, part2)`, and `cheby run aoc::day05`
+//! takes these arguments:
+//!
+//! - none: both parts on `inputs/day05.txt`
+//! - `--sample`: both parts on `inputs/day05.sample.txt`
+//! - `--input FILE`: both parts on `FILE`
+//! - `--part 1` or `--part 2`: one part only
+//! - `--submit 1` or `--submit 2`: solve that part on the real input and
+//!   send the answer to adventofcode.com
+//!
+//! Downloads and submissions need the session cookie of a logged-in
+//! browser, from `AOC_SESSION` or else from the file `.session`.
+
+import aoc::config
+import std::env
+import std::http
+import std::int
+import std::io
+import std::list
+import std::result
+import std::string
+import std::time
+import std::url
+
+// Paths and URLs
+
+/// `inputs/day05.txt` for day 5. Paths are relative to the package root,
+/// so run `cheby` there.
+pub fn input_path(day: Int) -> String {
+  let number = padded(day)
+  "inputs/day{number}.txt"
+}
+
+/// `inputs/day05.sample.txt` for day 5.
+pub fn sample_path(day: Int) -> String {
+  let number = padded(day)
+  "inputs/day{number}.sample.txt"
+}
+
+/// The day's number with two digits, such as `05`.
+pub fn padded(day: Int) -> String {
+  string::pad_start(int::show(day), 2, "0")
+}
+
+/// The puzzle's page, such as `https://adventofcode.com/2026/day/5`.
+pub fn puzzle_url(day: Int) -> String {
+  let year = config::year
+  "https://adventofcode.com/{year}/day/{day}"
+}
+
+// Errors
+
+/// What stopped a run. `main` prints it and exits with status 1.
+pub type Error {
+  /// The arguments are wrong, with the usage text.
+  Usage(String),
+  /// Neither `AOC_SESSION` nor `.session` holds a session cookie.
+  NoSession,
+  /// A file could not be read or written.
+  FileFailed(String, io::Error),
+  /// A request failed before an answer came.
+  RequestFailed(String, http::Error),
+  /// adventofcode.com answered with a status other than 200.
+  BadStatus(String, Int, String),
+}
+
+/// Makes `Error` satisfy `Show`, so `main` prints it as a message.
+pub fn show(error: Error) -> String {
+  case error {
+    Usage(text) => text
+    NoSession => "no session cookie: set AOC_SESSION, or put the cookie in .session"
+    FileFailed(path, reason) => "{path}: {reason}"
+    RequestFailed(address, reason) => "{address}: {reason}"
+    BadStatus(address, status, body) => "{address}: status {status}: {body}"
+  }
+}
+
+// Running a day
+
+/// What the arguments ask for.
+type Options {
+  /// The file to solve, or `None` for the real input.
+  path: Option<String>,
+  /// The parts to run.
+  parts: List<Int>,
+  /// The part to submit, if any.
+  submit: Option<Int>,
+}
+
+/// Runs a day as its arguments say. See the module's documentation.
+pub fn run<A: Show, B: Show>(
+  day: Int,
+  part1: fn(String) -> A,
+  part2: fn(String) -> B,
+) -> Result<Nil, Error> {
+  let defaults = Options { path: None, parts: [1, 2], submit: None }
+  use options <- result::try(read_options(day, env::args(), defaults))
+  use text <- result::try(read_input(day, options.path))
+  let answers = list::map(options.parts, fn(part) {
+    case part {
+      1 => timed("Part 1", fn() { part1(text) })
+      _ => timed("Part 2", fn() { part2(text) })
+    }
+  })
+  case options.submit, answers {
+    Some(level), [answer] => submit(day, level, answer)
+    _, _ => Ok(Nil)
+  }
+}
+
+/// Reads the arguments into `found`.
+fn read_options(day: Int, args: List<String>, found: Options) -> Result<Options, Error> {
+  case args {
+    [] => Ok(found)
+    ["--sample", ..rest] | ["-s", ..rest] => {
+      let path = sample_path(day)
+      read_options(day, rest, Options { ..found, path: Some(path) })
+    }
+    ["--input", path, ..rest] | ["-i", path, ..rest] => {
+      read_options(day, rest, Options { ..found, path: Some(path) })
+    }
+    ["--part", "1", ..rest] | ["-p", "1", ..rest] => {
+      read_options(day, rest, Options { ..found, parts: [1] })
+    }
+    ["--part", "2", ..rest] | ["-p", "2", ..rest] => {
+      read_options(day, rest, Options { ..found, parts: [2] })
+    }
+    ["--submit", "1", ..rest] => {
+      read_options(day, rest, Options { ..found, parts: [1], submit: Some(1) })
+    }
+    ["--submit", "2", ..rest] => {
+      read_options(day, rest, Options { ..found, parts: [2], submit: Some(2) })
+    }
+    _ => Err(Usage(usage(day)))
+  }
+}
+
+/// The usage text of a day.
+fn usage(day: Int) -> String {
+  let number = padded(day)
+  "usage: cheby run aoc::day{number} [-- [--sample | --input FILE] [--part N] [--submit N]]"
+}
+
+/// Reads the file at `path`, or the real input when there is none.
+fn read_input(day: Int, path: Option<String>) -> Result<String, Error> {
+  case path {
+    Some(file) => read_text(file)
+    None => input(day)
+  }
+}
+
+/// Runs `part`, prints its answer and how long it took, and returns the
+/// answer's text.
+fn timed<A: Show>(label: String, part: fn() -> A) -> String {
+  let start = time::monotonic()
+  let answer = part()
+  let took = time::elapsed(start)
+  let text = "{answer}"
+  io::println("{label}: {text}  ({took})")
+  text
+}
+
+// Inputs
+
+/// The day's input, from `inputs/dayNN.txt`. The first call downloads it
+/// and saves it there.
+pub fn input(day: Int) -> Result<String, Error> {
+  let path = input_path(day)
+  case io::read_file(path) {
+    Ok(text) => Ok(text)
+    Err(reason) => case io::is_not_found(reason) {
+      False => Err(FileFailed(path, reason))
+      True => {
+        let address = puzzle_url(day) + "/input"
+        use text <- result::try(get(address))
+        use _ <- result::try(save(path, text))
+        Ok(text)
+      }
+    }
+  }
+}
+
+/// The day's sample, from `inputs/dayNN.sample.txt`. `cheby run -- new N`
+/// saves the first example of the puzzle's page there, and you can edit it.
+pub fn sample(day: Int) -> Result<String, Error> {
+  read_text(sample_path(day))
+}
+
+/// Downloads the puzzle's page and returns the text of its first example,
+/// the first `<pre><code>` block.
+pub fn download_sample(day: Int) -> Result<String, Error> {
+  use page <- result::try(get(puzzle_url(day)))
+  let block = case string::split_once(page, "<pre><code>") {
+    Some((_, rest)) => case string::split_once(rest, "</code></pre>") {
+      Some((code, _)) => code
+      None => rest
+    }
+    None => ""
+  }
+  Ok(html_text(block))
+}
+
+/// Reads a whole file.
+pub fn read_text(path: String) -> Result<String, Error> {
+  io::read_file(path)
+  |> result::map_error(_, FileFailed(path, _))
+}
+
+/// Writes a whole file.
+pub fn save(path: String, text: String) -> Result<Nil, Error> {
+  io::write_file(path, text)
+  |> result::map_error(_, FileFailed(path, _))
+}
+
+// Talking to adventofcode.com
+
+/// The session cookie: `AOC_SESSION`, else the contents of `.session`.
+pub fn session() -> Result<String, Error> {
+  let token = case env::get("AOC_SESSION") {
+    Some(value) => string::trim(value)
+    None => case io::read_file(".session") {
+      Ok(text) => string::trim(text)
+      Err(_) => ""
+    }
+  }
+  case token {
+    "" => Err(NoSession)
+    _ => Ok(token)
+  }
+}
+
+/// The headers of every request: the session cookie and the User-Agent.
+fn headers() -> Result<List<(String, String)>, Error> {
+  use token <- result::try(session())
+  Ok([("cookie", "session=" + token), ("user-agent", config::user_agent)])
+}
+
+/// Sends a `GET` with the session cookie and returns the body.
+pub fn get(address: String) -> Result<String, Error> {
+  use sent <- result::try(headers())
+  use response <- result::try(
+    http::send(http::Get, address, sent, "")
+    |> result::map_error(_, RequestFailed(address, _)),
+  )
+  case response.status {
+    200 => Ok(response.body)
+    status => Err(BadStatus(address, status, string::trim(response.body)))
+  }
+}
+
+/// Sends `answer` for part `level` of `day` and prints the reply.
+pub fn submit(day: Int, level: Int, answer: String) -> Result<Nil, Error> {
+  let address = puzzle_url(day) + "/answer"
+  use sent <- result::try(headers())
+  let form = [("content-type", "application/x-www-form-urlencoded"), ..sent]
+  let body = url::encode_query([("level", int::show(level)), ("answer", answer)])
+  use response <- result::try(
+    http::post(address, form, body)
+    |> result::map_error(_, RequestFailed(address, _)),
+  )
+  let reply = case string::split_once(response.body, "<article>") {
+    Some((_, rest)) => case string::split_once(rest, "</article>") {
+      Some((article, _)) => article
+      None => rest
+    }
+    None => response.body
+  }
+  let text = reply
+    |> html_text
+    |> string::trim
+  io::println(text)
+  Ok(Nil)
+}
+
+/// The text of an HTML fragment: tags dropped and the entities that
+/// puzzle pages use decoded.
+pub fn html_text(html: String) -> String {
+  let (kept, _) = html
+    |> string::to_code_points
+    |> list::fold(_, ([], False), fn((found, in_tag), c) {
+      case c, in_tag {
+        "<", _ => (found, True)
+        ">", True => (found, False)
+        _, True => (found, True)
+        _, False => (list::push(found, c), False)
+      }
+    })
+  kept
+  |> string::join(_, "")
+  |> string::replace(_, "&lt;", "<")
+  |> string::replace(_, "&gt;", ">")
+  |> string::replace(_, "&quot;", "\"")
+  |> string::replace(_, "&#39;", "'")
+  |> string::replace(_, "&amp;", "&")
+}
+
+test "paths pad the day" {
+  assert input_path(5) == "inputs/day05.txt"
+  assert sample_path(12) == "inputs/day12.sample.txt"
+}
+
+test "html_text drops tags and decodes entities" {
+  assert html_text("<em>a</em> &lt;b&gt; &amp;&amp; c") == "a <b> && c"
+  assert html_text("#.#\n<em>x</em>.\n") == "#.#\nx.\n"
+}
+
+test "options read flags in any order" {
+  let defaults = Options { path: None, parts: [1, 2], submit: None }
+  let assert Ok(sample_run) = read_options(3, ["--part", "2", "--sample"], defaults)
+  assert sample_run.path == Some("inputs/day03.sample.txt")
+  assert sample_run.parts == [2]
+  let assert Ok(sending) = read_options(3, ["--submit", "1"], defaults)
+  assert sending.submit == Some(1)
+  assert read_options(3, ["--bogus"], defaults) == Err(Usage(usage(3)))
+}
+
+// Running every day
+
+/// A day's two parts, with their answers as text, for `run_all`.
+pub type Entry {
+  number: Int,
+  part1: fn(String) -> String,
+  part2: fn(String) -> String,
+}
+
+/// Wraps a day's parts for `run_all`.
+pub fn entry<A: Show, B: Show>(
+  number: Int,
+  part1: fn(String) -> A,
+  part2: fn(String) -> B,
+) -> Entry {
+  Entry {
+    number,
+    part1: fn(text) {
+      let answer = part1(text)
+      "{answer}"
+    },
+    part2: fn(text) {
+      let answer = part2(text)
+      "{answer}"
+    },
+  }
+}
+
+/// Runs both parts of every day on its real input, and prints the total
+/// time.
+pub fn run_all(days: List<Entry>) -> Result<Nil, Error> {
+  let start = time::monotonic()
+  use _ <- result::try(list::try_each(days, run_day))
+  let took = time::elapsed(start)
+  io::println("Total: {took}")
+  Ok(Nil)
+}
+
+/// Runs both parts of one day for `run_all`.
+fn run_day(solved: Entry) -> Result<Nil, Error> {
+  let number = padded(solved.number)
+  io::println("Day {number}")
+  use text <- result::try(input(solved.number))
+  let _ = timed("  Part 1", fn() { solved.part1(text) })
+  let _ = timed("  Part 2", fn() { solved.part2(text) })
+  Ok(Nil)
+}

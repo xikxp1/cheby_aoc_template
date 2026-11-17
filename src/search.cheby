@@ -1,0 +1,211 @@
+//! Searches over puzzle states: breadth-first search, Dijkstra's shortest
+//! paths, and finding where a repeated step starts to cycle.
+//!
+//! A state is any value that `==` and hashing work on, such as a position
+//! `(x, y)` or a record of a position and a direction. `dijkstra` also
+//! orders states, so its states satisfy `Compare`, as tuples of `Int`s do.
+
+import std::heap
+import std::list
+import std::map
+import std::ops::{Compare}
+
+/// The number of steps from `start` to every state it reaches, where
+/// `next` gives the states one step from a state.
+pub fn bfs<S>(start: S, next: fn(S) -> List<S>) -> map::Map<S, Int> {
+  fn level(frontier: List<S>, depth: Int, seen: map::Map<S, Int>) -> map::Map<S, Int> {
+    case frontier {
+      [] => seen
+      _ => {
+        let (fresh, known) = expand(frontier, next, depth + 1, seen)
+        level(fresh, depth + 1, known)
+      }
+    }
+  }
+  level([start], 0, map::from_list([(start, 0)]))
+}
+
+/// The number of steps from `start` to the nearest state for which
+/// `is_goal` holds, or `None` when no such state is reachable.
+pub fn bfs_to<S>(start: S, next: fn(S) -> List<S>, is_goal: fn(S) -> Bool) -> Option<Int> {
+  fn level(frontier: List<S>, depth: Int, seen: map::Map<S, Int>) -> Option<Int> {
+    case frontier, list::any(frontier, is_goal) {
+      [], _ => None
+      _, True => Some(depth)
+      _, False => {
+        let (fresh, known) = expand(frontier, next, depth + 1, seen)
+        level(fresh, depth + 1, known)
+      }
+    }
+  }
+  level([start], 0, map::from_list([(start, 0)]))
+}
+
+/// The states one step from `frontier` that `seen` does not hold yet, and
+/// `seen` with them at `depth`.
+fn expand<S>(
+  frontier: List<S>,
+  next: fn(S) -> List<S>,
+  depth: Int,
+  seen: map::Map<S, Int>,
+) -> (List<S>, map::Map<S, Int>) {
+  list::fold(frontier, ([], seen), fn((found, visited), state) {
+    list::fold(next(state), (found, visited), fn((more, marked), neighbour) {
+      case map::has_key(marked, neighbour) {
+        True => (more, marked)
+        False => (list::push(more, neighbour), map::insert(marked, neighbour, depth))
+      }
+    })
+  })
+}
+
+/// The cost of the cheapest path from `start` to a state for which
+/// `is_goal` holds, or `None` when no such state is reachable. `next`
+/// gives each state one step away with the step's cost, which must not be
+/// negative.
+pub fn dijkstra<S: Compare>(
+  start: S,
+  next: fn(S) -> List<(S, Int)>,
+  is_goal: fn(S) -> Bool,
+) -> Option<Int> {
+  fn step(queue: heap::Heap<(Int, S)>, best: map::Map<S, Int>) -> Option<Int> {
+    case heap::pop(queue) {
+      None => None
+      Some(((cost, state), rest)) => case map::get(best, state) {
+        Some(known) when known < cost => step(rest, best)
+        _ => case is_goal(state) {
+          True => Some(cost)
+          False => {
+            let (queued, improved) = relax(state, cost, next, rest, best)
+            step(queued, improved)
+          }
+        }
+      }
+    }
+  }
+  step(heap::push(heap::new_min(), (0, start)), map::from_list([(start, 0)]))
+}
+
+/// The cost of the cheapest path from `start` to every state it reaches.
+pub fn dijkstra_all<S: Compare>(start: S, next: fn(S) -> List<(S, Int)>) -> map::Map<S, Int> {
+  fn step(queue: heap::Heap<(Int, S)>, best: map::Map<S, Int>) -> map::Map<S, Int> {
+    case heap::pop(queue) {
+      None => best
+      Some(((cost, state), rest)) => case map::get(best, state) {
+        Some(known) when known < cost => step(rest, best)
+        _ => {
+          let (queued, improved) = relax(state, cost, next, rest, best)
+          step(queued, improved)
+        }
+      }
+    }
+  }
+  step(heap::push(heap::new_min(), (0, start)), map::from_list([(start, 0)]))
+}
+
+/// Queues each neighbour of `state` that its cost reaches more cheaply
+/// than any path found so far.
+fn relax<S: Compare>(
+  state: S,
+  cost: Int,
+  next: fn(S) -> List<(S, Int)>,
+  queue: heap::Heap<(Int, S)>,
+  best: map::Map<S, Int>,
+) -> (heap::Heap<(Int, S)>, map::Map<S, Int>) {
+  list::fold(next(state), (queue, best), fn((queued, known), (neighbour, weight)) {
+    let total = cost + weight
+    case map::get(known, neighbour) {
+      Some(old) when old <= total => (queued, known)
+      _ => (heap::push(queued, (total, neighbour)), map::insert(known, neighbour, total))
+    }
+  })
+}
+
+/// Where repeating `step` from `start` starts to cycle: the index of the
+/// first state that comes back, and the length of the cycle. State 0 is
+/// `start`. It does not stop when no state ever repeats.
+pub fn find_cycle<S>(start: S, step: fn(S) -> S) -> (Int, Int) {
+  let (_, first, length) = walk_to_cycle(start, step)
+  (first, length)
+}
+
+/// The state after `n` steps from `start`, found through the cycle of
+/// `find_cycle` instead of taking every step, for puzzles that ask about a
+/// billion steps.
+pub fn state_after<S>(start: S, step: fn(S) -> S, n: Int) -> S {
+  let (states, first, length) = walk_to_cycle(start, step)
+  let index = case n < first {
+    True => n
+    False => first + (n - first) % length
+  }
+  let assert Some(state) = list::get(states, index)
+  state
+}
+
+/// The states from `start` up to the first that repeats, the index of the
+/// earlier copy of that state, and the length of the cycle.
+fn walk_to_cycle<S>(start: S, step: fn(S) -> S) -> (List<S>, Int, Int) {
+  fn walk(state: S, index: Int, states: List<S>, seen: map::Map<S, Int>) -> (List<S>, Int, Int) {
+    case map::get(seen, state) {
+      Some(first) => (states, first, index - first)
+      None => walk(
+        step(state),
+        index + 1,
+        list::push(states, state),
+        map::insert(seen, state, index),
+      )
+    }
+  }
+  walk(start, 0, [], map::new())
+}
+
+/// A small graph for the tests: each number steps to the next two, and a
+/// step to `n + 2` costs 3.
+fn steps(n: Int) -> List<(Int, Int)> {
+  [(n + 1, 2), (n + 2, 3)]
+}
+
+test "bfs counts steps to every reachable state" {
+  let distances = bfs(0, fn(n) {
+    case n < 4 {
+      True => [n + 1, n + 2]
+      False => []
+    }
+  })
+  assert map::get(distances, 0) == Some(0)
+  assert map::get(distances, 2) == Some(1)
+  assert map::get(distances, 5) == Some(3)
+  assert map::size(distances) == 6
+}
+
+test "bfs_to stops at the nearest goal" {
+  assert bfs_to(0, fn(n) { [n + 1, n * 2] }, fn(n) { n == 10 }) == Some(5)
+  assert bfs_to(0, fn(_) { [] }, fn(n) { n == 1 }) == None
+}
+
+test "dijkstra finds the cheapest path" {
+  assert dijkstra(0, steps, fn(n) { n == 4 }) == Some(6)
+  assert dijkstra(0, steps, fn(n) { n == 3 }) == Some(5)
+  assert dijkstra(0, fn(_) { [] }, fn(n) { n == 3 }) == None
+  let costs = dijkstra_all(0, fn(n) {
+    case n < 3 {
+      True => steps(n)
+      False => []
+    }
+  })
+  assert map::get(costs, 4) == Some(6)
+}
+
+test "a cycle is found and skipped over" {
+  // 0, 1, 2, 3, 4, 2, 3, 4, …: the cycle starts at index 2 and has length 3.
+  let step = fn(n) {
+    case n {
+      4 => 2
+      _ => n + 1
+    }
+  }
+  assert find_cycle(0, step) == (2, 3)
+  assert state_after(0, step, 1) == 1
+  assert state_after(0, step, 5) == 2
+  assert state_after(0, step, 1_000_000_000) == 4
+}

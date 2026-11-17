@@ -1,0 +1,169 @@
+//! Character grids, as puzzles draw maps and mazes.
+//!
+//! A position is `(x, y)`: `x` counts columns from 0 at the left and `y`
+//! counts rows from 0 at the top, so "up" is `y - 1`. A grid keeps each
+//! cell as a one-character `String` in a map from positions.
+
+import std::int
+import std::list
+import std::map
+import std::string
+
+/// A rectangle of one-character cells.
+pub type Grid {
+  cells: map::Map<(Int, Int), String>,
+  width: Int,
+  height: Int,
+}
+
+/// Reads a grid with one row per line. Blank lines at the end are
+/// skipped, and the width is that of the longest row.
+pub fn parse(text: String) -> Grid {
+  let rows = text
+    |> string::lines
+    |> list::map(_, string::trim_end)
+    |> drop_blank_end
+  let cells = rows
+    |> list::enumerate
+    |> list::fold(_, map::new(), fn(found, (y, row)) {
+      row
+      |> string::to_graphemes
+      |> list::enumerate
+      |> list::fold(_, found, fn(more, (x, cell)) { map::insert(more, (x, y), cell) })
+    })
+  let width = list::fold(rows, 0, fn(widest, row) {
+    int::max(widest, string::grapheme_length(row))
+  })
+  Grid { cells, width, height: list::length(rows) }
+}
+
+/// `rows` without the blank rows at its end.
+fn drop_blank_end(rows: List<String>) -> List<String> {
+  case list::last(rows) {
+    Some("") => drop_blank_end(list::take(rows, list::length(rows) - 1))
+    _ => rows
+  }
+}
+
+/// The cell at `at`, or `None` outside the grid.
+pub fn get(g: Grid, at: (Int, Int)) -> Option<String> {
+  map::get(g.cells, at)
+}
+
+/// The grid with `cell` at `at`.
+pub fn set(g: Grid, at: (Int, Int), cell: String) -> Grid {
+  Grid { ..g, cells: map::insert(g.cells, at, cell) }
+}
+
+/// Whether `at` lies inside the grid's rectangle.
+pub fn in_bounds(g: Grid, at: (Int, Int)) -> Bool {
+  let (x, y) = at
+  x >= 0 && y >= 0 && x < g.width && y < g.height
+}
+
+/// Every position of the rectangle, row by row from the top left.
+pub fn positions(g: Grid) -> List<(Int, Int)> {
+  list::range(0, g.height)
+  |> list::flat_map(_, fn(y) { list::map(list::range(0, g.width), fn(x) { (x, y) }) })
+}
+
+/// The first position, row by row, that holds `cell`.
+pub fn find(g: Grid, cell: String) -> Option<(Int, Int)> {
+  list::find(positions(g), fn(at) { map::get(g.cells, at) == Some(cell) })
+}
+
+/// Every position, row by row, that holds `cell`.
+pub fn find_all(g: Grid, cell: String) -> List<(Int, Int)> {
+  list::filter(positions(g), fn(at) { map::get(g.cells, at) == Some(cell) })
+}
+
+/// The grid drawn as text, one line per row, for debugging. A missing cell
+/// is drawn as a space.
+pub fn draw(g: Grid) -> String {
+  list::range(0, g.height)
+  |> list::map(_, fn(y) {
+    list::range(0, g.width)
+    |> list::map(_, fn(x) {
+      case map::get(g.cells, (x, y)) {
+        Some(cell) => cell
+        None => " "
+      }
+    })
+    |> string::join(_, "")
+  })
+  |> string::join(_, "\n")
+}
+
+// Moving
+
+/// Up, right, down and left, clockwise from up.
+pub const directions4: List<(Int, Int)> = [(0, -1), (1, 0), (0, 1), (-1, 0)]
+
+/// The eight directions, clockwise from up.
+pub const directions8: List<(Int, Int)> = [
+  (0, -1),
+  (1, -1),
+  (1, 0),
+  (1, 1),
+  (0, 1),
+  (-1, 1),
+  (-1, 0),
+  (-1, -1),
+]
+
+/// `at` moved by `step`.
+pub fn add(at: (Int, Int), step: (Int, Int)) -> (Int, Int) {
+  let (x, y) = at
+  let (dx, dy) = step
+  (x + dx, y + dy)
+}
+
+/// `step` turned a quarter clockwise, so up becomes right.
+pub fn turn_right(step: (Int, Int)) -> (Int, Int) {
+  let (dx, dy) = step
+  (-dy, dx)
+}
+
+/// `step` turned a quarter anticlockwise, so up becomes left.
+pub fn turn_left(step: (Int, Int)) -> (Int, Int) {
+  let (dx, dy) = step
+  (dy, -dx)
+}
+
+/// The four positions next to `at`, clockwise from up.
+pub fn neighbours4(at: (Int, Int)) -> List<(Int, Int)> {
+  list::map(directions4, fn(step) { add(at, step) })
+}
+
+/// The eight positions around `at`, clockwise from up.
+pub fn neighbours8(at: (Int, Int)) -> List<(Int, Int)> {
+  list::map(directions8, fn(step) { add(at, step) })
+}
+
+/// The number of steps between `a` and `b` along rows and columns.
+pub fn manhattan(a: (Int, Int), b: (Int, Int)) -> Int {
+  let (ax, ay) = a
+  let (bx, by) = b
+  int::abs(ax - bx) + int::abs(ay - by)
+}
+
+test "parse reads rows and columns" {
+  let g = parse("#.\n.S\n\n")
+  assert g.width == 2
+  assert g.height == 2
+  assert get(g, (1, 0)) == Some(".")
+  assert get(g, (5, 5)) == None
+  assert find(g, "S") == Some((1, 1))
+  assert find_all(g, ".") == [(1, 0), (0, 1)]
+  assert draw(set(g, (0, 0), "o")) == "o.\n.S"
+}
+
+test "moving turns and steps" {
+  assert turn_right((0, -1)) == (1, 0)
+  assert turn_left((0, -1)) == (-1, 0)
+  assert neighbours4((0, 0)) == [(0, -1), (1, 0), (0, 1), (-1, 0)]
+  assert list::length(neighbours8((3, 3))) == 8
+  assert manhattan((1, 2), (4, -2)) == 7
+  assert in_bounds(parse("ab\ncd"), (1, 1))
+  assert !in_bounds(parse("ab\ncd"), (2, 0))
+}

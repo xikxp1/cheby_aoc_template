@@ -1,0 +1,6 @@
+/target
+/build
+# Advent of Code asks people not to share their inputs.
+/inputs/
+# The session cookie.
+/.session

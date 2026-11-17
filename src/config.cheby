@@ -1,0 +1,11 @@
+//! Settings for this checkout: the puzzle year, and the User-Agent that
+//! every request to adventofcode.com carries.
+
+/// The year of the puzzles this checkout solves.
+pub const year: Int = 2026
+
+/// The User-Agent of every request: the tool, then who runs it. Advent of
+/// Code asks automated tools to say how to reach the person sending the
+/// requests, so replace `<your contact>` with your email or the URL of the
+/// repository with your solutions.
+pub const user_agent: String = "github.com/xikxp1/cheby_aoc_template by <your contact>"

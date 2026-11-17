@@ -1,0 +1,8 @@
+//! Runs every day on its real input, with timings: `cheby run aoc::all`.
+//! `cheby run -- new N` and `cheby run -- sync` rewrite this file.
+
+import aoc::kit
+
+fn main() -> Result<Nil, kit::Error> {
+  kit::run_all([])
+}
