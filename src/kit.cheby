@@ -1,15 +1,27 @@
 //! Runs a day's solution: finds its input, downloading it on first use,
 //! times each part and prints the answers, or submits one.
 //!
-//! A day's `main` is `kit::run(5, part1, part2)`, and `cheby run aoc::day05`
-//! takes these arguments:
+//! A day's `main` calls one of these:
+//!
+//! - `kit::run(5, part1, part2)`: each part takes the input text.
+//! - `kit::run_with(5, part1, part2)`: each part also takes a `Bool`, which
+//!   is `True` on `--sample`, for puzzles whose sample uses other numbers.
+//! - `kit::run_parsed(5, parse, part1, part2)`: `parse` takes the text and
+//!   that `Bool`, runs once, and both parts take what it returns.
+//! - `kit::run_one(12, part1)`: the last day, which has one part.
+//!
+//! `cheby run aoc::day05` then takes these arguments:
 //!
 //! - none: both parts on `inputs/day05.txt`
-//! - `--sample`: both parts on `inputs/day05.sample.txt`
+//! - `--sample`: part 1 on `inputs/day05.sample.txt`, and part 2 on
+//!   `inputs/day05.sample2.txt` when that file exists, else on the same
+//!   sample as part 1
 //! - `--input FILE`: both parts on `FILE`
 //! - `--part 1` or `--part 2`: one part only
 //! - `--submit 1` or `--submit 2`: solve that part on the real input and
-//!   send the answer to adventofcode.com
+//!   send the answer to adventofcode.com. Only the real input can be
+//!   submitted, so `--submit` with `--sample` or `--input` is a usage
+//!   error.
 //!
 //! Downloads and submissions need the session cookie of a logged-in
 //! browser, from `AOC_SESSION` or else from the file `.session`.
@@ -20,6 +32,7 @@ import std::http
 import std::int
 import std::io
 import std::list
+import std::option
 import std::result
 import std::string
 import std::time
@@ -38,6 +51,13 @@ pub fn input_path(day: Int) -> String {
 pub fn sample_path(day: Int) -> String {
   let number = padded(day)
   "inputs/day{number}.sample.txt"
+}
+
+/// `inputs/day05.sample2.txt` for day 5: part 2's own sample, when the
+/// puzzle gives part 2 another example.
+pub fn sample2_path(day: Int) -> String {
+  let number = padded(day)
+  "inputs/day{number}.sample2.txt"
 }
 
 /// The day's number with two digits, such as `05`.
@@ -80,30 +100,119 @@ pub fn show(error: Error) -> String {
 
 // Running a day
 
+/// Where the input of a run comes from.
+type Source {
+  /// The real input, `inputs/dayNN.txt`.
+  Real,
+  /// The sample: `inputs/dayNN.sample.txt`, and for part 2
+  /// `inputs/dayNN.sample2.txt` when it exists.
+  Sample,
+  /// The file that `--input` names.
+  Given(String),
+}
+
 /// What the arguments ask for.
 type Options {
-  /// The file to solve, or `None` for the real input.
-  path: Option<String>,
-  /// The parts to run.
-  parts: List<Int>,
+  /// The input to solve.
+  source: Source,
+  /// The one part to run, or `None` for every part.
+  only: Option<Int>,
   /// The part to submit, if any.
   submit: Option<Int>,
 }
 
-/// Runs a day as its arguments say. See the module's documentation.
+/// Runs a day as its arguments say. Each part takes the input text. See the
+/// module's documentation.
 pub fn run<A: Show, B: Show>(
   day: Int,
   part1: fn(String) -> A,
   part2: fn(String) -> B,
 ) -> Result<Nil, Error> {
-  let defaults = Options { path: None, parts: [1, 2], submit: None }
+  run_parts(day, fn(text, _) { text }, False, [(1, shown(part1)), (2, shown(part2))])
+}
+
+/// Runs a day like `run`, but each part also takes a `Bool` that is `True`
+/// on `--sample`. Use it when the puzzle's sample asks for other numbers
+/// than the real input, such as 10 steps instead of 1000.
+pub fn run_with<A: Show, B: Show>(
+  day: Int,
+  part1: fn(String, Bool) -> A,
+  part2: fn(String, Bool) -> B,
+) -> Result<Nil, Error> {
+  let solve1 = fn((text, on_sample)) { part1(text, on_sample) }
+  let solve2 = fn((text, on_sample)) { part2(text, on_sample) }
+  run_parts(day, fn(text, on_sample) { (text, on_sample) }, False, [
+    (1, shown(solve1)),
+    (2, shown(solve2)),
+  ])
+}
+
+/// Runs a day whose parts share their parsing. `parse` takes the input
+/// text and a `Bool` that is `True` on `--sample`. It runs once, timed on a
+/// line of its own, and both parts take what it returns. When part 2 has a
+/// sample of its own, `--sample` parses each sample once.
+pub fn run_parsed<T, A: Show, B: Show>(
+  day: Int,
+  parse: fn(String, Bool) -> T,
+  part1: fn(T) -> A,
+  part2: fn(T) -> B,
+) -> Result<Nil, Error> {
+  run_parts(day, parse, True, [(1, shown(part1)), (2, shown(part2))])
+}
+
+/// Runs a day that has only part 1, as the last day of the year does.
+/// `--part 2` and `--submit 2` are usage errors.
+pub fn run_one<A: Show>(day: Int, part1: fn(String) -> A) -> Result<Nil, Error> {
+  run_parts(day, fn(text, _) { text }, False, [(1, shown(part1))])
+}
+
+/// A part whose answer is turned into text.
+fn shown<T, A: Show>(part: fn(T) -> A) -> fn(T) -> String {
+  fn(value) {
+    let answer = part(value)
+    "{answer}"
+  }
+}
+
+/// What every `run` does: reads the arguments and the input of each part,
+/// parses each input file once, runs the parts and submits an answer when
+/// asked. `timed_parse` prints the parse's time.
+fn run_parts<T>(
+  day: Int,
+  parse: fn(String, Bool) -> T,
+  timed_parse: Bool,
+  parts: List<(Int, fn(T) -> String)>,
+) -> Result<Nil, Error> {
+  let defaults = Options { source: Real, only: None, submit: None }
   use options <- result::try(read_options(day, env::args(), defaults))
-  use text <- result::try(read_input(day, options.path))
-  let answers = list::map(options.parts, fn(part) {
-    case part {
-      1 => timed("Part 1", fn() { part1(text) })
-      _ => timed("Part 2", fn() { part2(text) })
+  let chosen = case options.only {
+    None => parts
+    Some(wanted) => list::filter(parts, fn((part, _)) { part == wanted })
+  }
+  guard !list::is_empty(chosen) else {
+    let wanted = option::expect(options.only, "every part was filtered out without --part")
+    Err(Usage("day {day} has no part {wanted}"))
+  }
+  let on_sample = options.source == Sample
+  use inputs <- result::try(list::try_map(chosen, fn((part, solve)) {
+    use (path, text) <- result::try(part_input(day, options.source, part))
+    Ok((part, solve, path, text))
+  }))
+  let parsed = list::fold(inputs, [], fn(done, (_, _, path, text)) {
+    case list::any(done, fn((seen, _)) { seen == path }) {
+      True => done
+      False => {
+        let value = case timed_parse {
+          True => timed_value("Parse: {path}", fn() { parse(text, on_sample) })
+          False => parse(text, on_sample)
+        }
+        list::push(done, (path, value))
+      }
     }
+  })
+  let answers = list::map(inputs, fn((part, solve, path, _)) {
+    let assert Some((_, value)) = list::find(parsed, fn((seen, _)) { seen == path })
+    timed("Part {part}", fn() { solve(value) })
   })
   case options.submit, answers {
     Some(level), [answer] => submit(day, level, answer)
@@ -114,29 +223,34 @@ pub fn run<A: Show, B: Show>(
 /// Reads the arguments into `found`.
 fn read_options(day: Int, args: List<String>, found: Options) -> Result<Options, Error> {
   case args {
-    [] => Ok(found)
+    [] => case found.submit, found.source {
+      Some(_), Sample | Given(_) => Err(Usage(real_only))
+      _, _ => Ok(found)
+    }
     ["--sample", ..rest] | ["-s", ..rest] => {
-      let path = sample_path(day)
-      read_options(day, rest, Options { ..found, path: Some(path) })
+      read_options(day, rest, Options { ..found, source: Sample })
     }
     ["--input", path, ..rest] | ["-i", path, ..rest] => {
-      read_options(day, rest, Options { ..found, path: Some(path) })
+      read_options(day, rest, Options { ..found, source: Given(path) })
     }
     ["--part", "1", ..rest] | ["-p", "1", ..rest] => {
-      read_options(day, rest, Options { ..found, parts: [1] })
+      read_options(day, rest, Options { ..found, only: Some(1) })
     }
     ["--part", "2", ..rest] | ["-p", "2", ..rest] => {
-      read_options(day, rest, Options { ..found, parts: [2] })
+      read_options(day, rest, Options { ..found, only: Some(2) })
     }
     ["--submit", "1", ..rest] => {
-      read_options(day, rest, Options { ..found, parts: [1], submit: Some(1) })
+      read_options(day, rest, Options { ..found, only: Some(1), submit: Some(1) })
     }
     ["--submit", "2", ..rest] => {
-      read_options(day, rest, Options { ..found, parts: [2], submit: Some(2) })
+      read_options(day, rest, Options { ..found, only: Some(2), submit: Some(2) })
     }
     _ => Err(Usage(usage(day)))
   }
 }
+
+/// The error of `--submit` with `--sample` or `--input`.
+const real_only: String = "only the real input can be submitted: drop --sample and --input"
 
 /// The usage text of a day.
 fn usage(day: Int) -> String {
@@ -144,23 +258,51 @@ fn usage(day: Int) -> String {
   "usage: cheby run aoc::day{number} [-- [--sample | --input FILE] [--part N] [--submit N]]"
 }
 
-/// Reads the file at `path`, or the real input when there is none.
-fn read_input(day: Int, path: Option<String>) -> Result<String, Error> {
-  case path {
-    Some(file) => read_text(file)
-    None => input(day)
+/// The file that part `part` reads from `source`, and its text.
+fn part_input(day: Int, source: Source, part: Int) -> Result<(String, String), Error> {
+  case source, part {
+    Real, _ => {
+      use text <- result::try(input(day))
+      Ok((input_path(day), text))
+    }
+    Given(path), _ => {
+      use text <- result::try(read_text(path))
+      Ok((path, text))
+    }
+    Sample, 2 => {
+      let path = sample2_path(day)
+      case io::read_file(path) {
+        Ok(text) => Ok((path, text))
+        Err(reason) => case io::is_not_found(reason) {
+          True => part_input(day, Sample, 1)
+          False => Err(FileFailed(path, reason))
+        }
+      }
+    }
+    Sample, _ => {
+      use text <- result::try(sample(day))
+      Ok((sample_path(day), text))
+    }
   }
 }
 
 /// Runs `part`, prints its answer and how long it took, and returns the
 /// answer's text.
-fn timed<A: Show>(label: String, part: fn() -> A) -> String {
+fn timed(label: String, part: fn() -> String) -> String {
   let start = time::monotonic()
-  let answer = part()
+  let text = part()
   let took = time::elapsed(start)
-  let text = "{answer}"
   io::println("{label}: {text}  ({took})")
   text
+}
+
+/// Runs `work`, prints `label` and how long it took, and returns its value.
+fn timed_value<T>(label: String, work: fn() -> T) -> T {
+  let start = time::monotonic()
+  let value = work()
+  let took = time::elapsed(start)
+  io::println("{label}  ({took})")
+  value
 }
 
 // Inputs
@@ -189,18 +331,38 @@ pub fn sample(day: Int) -> Result<String, Error> {
   read_text(sample_path(day))
 }
 
-/// Downloads the puzzle's page and returns the text of its first example,
-/// the first `<pre><code>` block.
-pub fn download_sample(day: Int) -> Result<String, Error> {
-  use page <- result::try(get(puzzle_url(day)))
-  let block = case string::split_once(page, "<pre><code>") {
-    Some((_, rest)) => case string::split_once(rest, "</code></pre>") {
-      Some((code, _)) => code
-      None => rest
+/// Part 2's sample, from `inputs/dayNN.sample2.txt` when that file exists,
+/// else the same sample as `sample`. `cheby run -- fetch N` saves part 2's
+/// first example there once part 2 is open, and you can write the file by
+/// hand.
+pub fn sample2(day: Int) -> Result<String, Error> {
+  let path = sample2_path(day)
+  case io::read_file(path) {
+    Ok(text) => Ok(text)
+    Err(reason) => case io::is_not_found(reason) {
+      True => sample(day)
+      False => Err(FileFailed(path, reason))
     }
-    None => ""
   }
-  Ok(html_text(block))
+}
+
+/// The text of the first example in a puzzle page's HTML, its first
+/// `<pre><code>` block, or `None` when it has none.
+pub fn first_example(html: String) -> Option<String> {
+  use (_, rest) <- option::map(string::split_once(html, "<pre><code>"))
+  let block = case string::split_once(rest, "</code></pre>") {
+    Some((code, _)) => code
+    None => rest
+  }
+  html_text(block)
+}
+
+/// The text of part 2's first example in a puzzle page's HTML. It is
+/// `None` when the page has no part 2 yet, because part 1 is not solved,
+/// and when part 2 has no example of its own.
+pub fn part2_example(page: String) -> Option<String> {
+  use (_, part2) <- option::then(string::split_once(page, "id=\"part2\""))
+  first_example(part2)
 }
 
 /// Reads a whole file.
@@ -300,6 +462,7 @@ pub fn html_text(html: String) -> String {
 test "paths pad the day" {
   assert input_path(5) == "inputs/day05.txt"
   assert sample_path(12) == "inputs/day12.sample.txt"
+  assert sample2_path(3) == "inputs/day03.sample2.txt"
 }
 
 test "html_text drops tags and decodes entities" {
@@ -308,59 +471,72 @@ test "html_text drops tags and decodes entities" {
 }
 
 test "options read flags in any order" {
-  let defaults = Options { path: None, parts: [1, 2], submit: None }
+  let defaults = Options { source: Real, only: None, submit: None }
   let assert Ok(sample_run) = read_options(3, ["--part", "2", "--sample"], defaults)
-  assert sample_run.path == Some("inputs/day03.sample.txt")
-  assert sample_run.parts == [2]
+  assert sample_run.source == Sample
+  assert sample_run.only == Some(2)
+  let assert Ok(given) = read_options(3, ["-i", "mine.txt"], defaults)
+  assert given.source == Given("mine.txt")
+  assert given.only == None
   let assert Ok(sending) = read_options(3, ["--submit", "1"], defaults)
   assert sending.submit == Some(1)
+  assert sending.only == Some(1)
   assert read_options(3, ["--bogus"], defaults) == Err(Usage(usage(3)))
+}
+
+test "only the real input can be submitted" {
+  let defaults = Options { source: Real, only: None, submit: None }
+  let refused = Err(Usage(real_only))
+  assert read_options(3, ["--submit", "1", "--sample"], defaults) == refused
+  assert read_options(3, ["-s", "--submit", "2"], defaults) == refused
+  assert read_options(3, ["--input", "mine.txt", "--submit", "1"], defaults) == refused
+  assert read_options(3, ["--submit", "2", "-i", "mine.txt"], defaults) == refused
+  let assert Ok(real) = read_options(3, ["--part", "2", "--submit", "2"], defaults)
+  assert real.source == Real
+  assert real.submit == Some(2)
+}
+
+test "examples come from the page's code blocks" {
+  let before = "<article><p>Try:</p><pre><code>1 &lt; 2\n</code></pre></article>"
+  assert first_example(before) == Some("1 < 2\n")
+  assert part2_example(before) == None
+  let heading = "<article class=\"day-desc\"><h2 id=\"part2\">--- Part Two ---</h2>"
+  let after = before + heading + "<p>Now:</p><pre><code><em>abc</em>\n</code></pre></article>"
+  assert first_example(after) == Some("1 < 2\n")
+  assert part2_example(after) == Some("abc\n")
+  let no_example = before + "<h2 id=\"part2\">--- Part Two ---</h2><p>Count more.</p>"
+  assert part2_example(no_example) == None
+  assert first_example("<p>no code</p>") == None
 }
 
 // Running every day
 
-/// A day's two parts, with their answers as text, for `run_all`.
+/// A day for `run_all`: its number and its `main`.
 pub type Entry {
   number: Int,
-  part1: fn(String) -> String,
-  part2: fn(String) -> String,
+  main: fn() -> Result<Nil, Error>,
 }
 
-/// Wraps a day's parts for `run_all`.
-pub fn entry<A: Show, B: Show>(
-  number: Int,
-  part1: fn(String) -> A,
-  part2: fn(String) -> B,
-) -> Entry {
-  Entry {
-    number,
-    part1: fn(text) {
-      let answer = part1(text)
-      "{answer}"
-    },
-    part2: fn(text) {
-      let answer = part2(text)
-      "{answer}"
-    },
-  }
+/// Wraps a day's `main` for `run_all`, as in `kit::entry(5, day05::main)`.
+/// Every form of `run` fits, so `src/all.cheby` does not depend on which
+/// one a day calls.
+pub fn entry(number: Int, main: fn() -> Result<Nil, Error>) -> Entry {
+  Entry { number, main }
 }
 
-/// Runs both parts of every day on its real input, and prints the total
-/// time.
+/// Runs every day's `main` with no arguments, so every part on its real
+/// input, and prints the total time.
 pub fn run_all(days: List<Entry>) -> Result<Nil, Error> {
+  guard list::is_empty(env::args()) else {
+    Err(Usage("usage: cheby run aoc::all"))
+  }
   let start = time::monotonic()
-  use _ <- result::try(list::try_each(days, run_day))
+  use _ <- result::try(list::try_each(days, fn(solved) {
+    let number = padded(solved.number)
+    io::println("Day {number}")
+    solved.main()
+  }))
   let took = time::elapsed(start)
   io::println("Total: {took}")
-  Ok(Nil)
-}
-
-/// Runs both parts of one day for `run_all`.
-fn run_day(solved: Entry) -> Result<Nil, Error> {
-  let number = padded(solved.number)
-  io::println("Day {number}")
-  use text <- result::try(input(solved.number))
-  let _ = timed("  Part 1", fn() { solved.part1(text) })
-  let _ = timed("  Part 2", fn() { solved.part2(text) })
   Ok(Nil)
 }

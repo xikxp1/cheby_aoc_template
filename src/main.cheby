@@ -3,6 +3,8 @@
 //! - `cheby run -- new 5` writes `src/day05.cheby` from a skeleton, adds
 //!   it to `src/all.cheby`, and downloads the day's input and sample.
 //! - `cheby run -- fetch 5` downloads them again, keeping files that exist.
+//! - `cheby run -- remove 5` deletes `src/day05.cheby` and rewrites
+//!   `src/all.cheby` without it.
 //! - `cheby run -- sync` rewrites `src/all.cheby` from the `dayNN.cheby`
 //!   files in `src`.
 //!
@@ -16,6 +18,7 @@ import std::file
 import std::int
 import std::io
 import std::list
+import std::option
 import std::result
 import std::string
 
@@ -23,18 +26,19 @@ fn main() -> Result<Nil, kit::Error> {
   case env::args() {
     ["new", day] => with_day(day, new_day)
     ["fetch", day] => with_day(day, fetch)
+    ["remove", day] => with_day(day, remove)
     ["sync"] => sync()
     _ => Err(kit::Usage(usage))
   }
 }
 
 /// The tool's usage text.
-const usage: String = "usage: cheby run -- new DAY | fetch DAY | sync"
+const usage: String = "usage: cheby run -- new DAY | fetch DAY | remove DAY | sync"
 
-/// Calls `action` with the day that `text` names, from 1 to 25.
+/// Calls `action` with the day that `text` names, from 1 to `config::days`.
 fn with_day(text: String, action: fn(Int) -> Result<Nil, kit::Error>) -> Result<Nil, kit::Error> {
   case int::parse(text) {
-    Ok(day) when day >= 1 && day <= 25 => action(day)
+    Ok(day) when day >= 1 && day <= config::days => action(day)
     _ => Err(kit::Usage(usage))
   }
 }
@@ -62,24 +66,81 @@ fn new_day(day: Int) -> Result<Nil, kit::Error> {
   Ok(Nil)
 }
 
-/// Downloads the day's input and its sample into `inputs/`, keeping files
-/// that exist. A failed download is reported and does not stop the tool,
-/// since a puzzle may not be open yet.
+/// Deletes the day's module and rewrites `src/all.cheby` without it. The
+/// day's inputs are kept.
+fn remove(day: Int) -> Result<Nil, kit::Error> {
+  let number = kit::padded(day)
+  let path = "src/day{number}.cheby"
+  use exists <- result::try(is_file(path))
+  use _ <- result::try(case exists {
+    True => {
+      use _ <- result::try(
+        file::remove_file(path)
+        |> result::map_error(_, kit::FileFailed(path, _)),
+      )
+      io::println("removed {path}; inputs/day{number}*.txt are kept")
+      Ok(Nil)
+    }
+    False => {
+      io::println("{path} does not exist")
+      Ok(Nil)
+    }
+  })
+  sync()
+}
+
+/// Downloads the day's input, then its samples, into `inputs/`, keeping
+/// files that exist. A failed download is reported and does not stop the
+/// tool, since a puzzle may not be open yet. When the input fails, the
+/// page is not requested, so a closed day costs one request.
 fn fetch(day: Int) -> Result<Nil, kit::Error> {
   use _ <- result::try(
     file::create_dir_all("inputs")
     |> result::map_error(_, kit::FileFailed("inputs", _)),
   )
   let input_path = kit::input_path(day)
-  report(input_path, kit::input(day))
-  let sample_path = kit::sample_path(day)
-  use exists <- result::try(is_file(sample_path))
-  case exists {
-    True => io::println("{sample_path} exists, so it is kept")
-    False => {
-      let saved = kit::download_sample(day)
-        |> result::try(_, fn(text) { kit::save(sample_path, text) })
-      report(sample_path, saved)
+  case kit::input(day) {
+    Ok(_) => {
+      io::println("{input_path} is ready")
+      fetch_samples(day)
+    }
+    Err(reason) => {
+      io::eprintln("{input_path} is not ready: {reason}")
+      io::eprintln("the samples were not fetched either; run fetch {day} again later")
+      Ok(Nil)
+    }
+  }
+}
+
+/// Saves the first example of the puzzle's page as the sample, and the
+/// first example of part 2 as the second sample once part 2 is open. It
+/// requests the page only when one of the two files is missing.
+fn fetch_samples(day: Int) -> Result<Nil, kit::Error> {
+  let first = kit::sample_path(day)
+  let second = kit::sample2_path(day)
+  use has_first <- result::try(is_file(first))
+  use has_second <- result::try(is_file(second))
+  guard !has_first || !has_second else {
+    io::println("{first} and {second} exist, so they are kept")
+    Ok(Nil)
+  }
+  case kit::get(kit::puzzle_url(day)) {
+    Err(reason) => io::eprintln("the samples are not ready: {reason}")
+    Ok(page) => {
+      case has_first {
+        True => io::println("{first} exists, so it is kept")
+        False => {
+          let text = option::unwrap_or(kit::first_example(page), "")
+          report(first, kit::save(first, text))
+        }
+      }
+      case has_second, kit::part2_example(page) {
+        True, _ => io::println("{second} exists, so it is kept")
+        False, Some(text) => report(second, kit::save(second, text))
+        False, None => {
+          io::println("{second} is not written: part 2 is not open or has no example")
+        }
+      }
     }
   }
   Ok(Nil)
@@ -142,7 +203,7 @@ fn all_module(days: List<Int>) -> String {
   })
   let entries = list::map(days, fn(day) {
     let number = kit::padded(day)
-    "kit::entry({day}, day{number}::part1, day{number}::part2)"
+    "kit::entry({day}, day{number}::main)"
   })
   // `cheby fmt` keeps the list on one line when it fits in 100 columns.
   let one_line = "  kit::run_all([" + string::join(entries, ", ") + "])"
@@ -155,7 +216,7 @@ fn all_module(days: List<Int>) -> String {
   }
   let header = [
     "//! Runs every day on its real input, with timings: `cheby run aoc::all`.",
-    "//! `cheby run -- new N` and `cheby run -- sync` rewrite this file.",
+    "//! `cheby run -- new N`, `remove N` and `sync` rewrite this file.",
     "",
   ]
   let opening = ["import aoc::kit", "", "fn main() -> Result<Nil, kit::Error> \{"]
@@ -164,10 +225,21 @@ fn all_module(days: List<Int>) -> String {
   |> string::join(_, "\n")
 }
 
-/// The first text of a day's module.
+/// The first text of a day's module. The last day, `config::days`, has
+/// one part.
 fn skeleton(day: Int) -> String {
-  let year = config::year
-  r#"//! Advent of Code YEAR, day DAY.
+  let text = case day == config::days {
+    True => last_day
+    False => two_parts
+  }
+  text
+  |> string::replace(_, "YEAR", int::show(config::year))
+  |> string::replace(_, "dayNN", "day" + kit::padded(day))
+  |> string::replace(_, "DAY", int::show(day))
+}
+
+/// The skeleton of a day with two parts.
+const two_parts: String = r#"//! Advent of Code YEAR, day DAY.
 
 import aoc::kit
 
@@ -185,8 +257,9 @@ fn main() -> Result<Nil, kit::Error> {
   kit::run(DAY, part1, part2)
 }
 
-// `cheby test --module aoc::dayNN` checks the parts on the sample in
-// `inputs/dayNN.sample.txt`. Put the puzzle's answers for the sample here.
+// `cheby test --module aoc::dayNN` checks the parts on the samples:
+// `inputs/dayNN.sample.txt`, and for part 2 `inputs/dayNN.sample2.txt`
+// when it exists. Put the puzzle's answers for the samples here.
 
 test "part 1 on the sample" {
   let assert Ok(sample) = kit::sample(DAY)
@@ -194,14 +267,33 @@ test "part 1 on the sample" {
 }
 
 test "part 2 on the sample" {
-  let assert Ok(sample) = kit::sample(DAY)
+  let assert Ok(sample) = kit::sample2(DAY)
   assert part2(sample) == 0
 }
 "#
-  |> string::replace(_, "YEAR", int::show(year))
-  |> string::replace(_, "dayNN", "day" + kit::padded(day))
-  |> string::replace(_, "DAY", int::show(day))
+
+/// The skeleton of the last day, which has one part.
+const last_day: String = r#"//! Advent of Code YEAR, day DAY, the last day. It has one part.
+
+import aoc::kit
+
+/// Part 1.
+fn part1(input: String) -> Int {
+  todo as "day DAY, part 1"
 }
+
+fn main() -> Result<Nil, kit::Error> {
+  kit::run_one(DAY, part1)
+}
+
+// `cheby test --module aoc::dayNN` checks the part on the sample in
+// `inputs/dayNN.sample.txt`. Put the puzzle's answer for the sample here.
+
+test "part 1 on the sample" {
+  let assert Ok(sample) = kit::sample(DAY)
+  assert part1(sample) == 0
+}
+"#
 
 test "day_of_file reads two-digit day modules" {
   assert day_of_file("day05.cheby") == Some(5)
@@ -217,7 +309,21 @@ test "all_module lists the days in order" {
   assert string::ends_with(empty, "  kit::run_all([])\n}\n")
   let text = all_module([1, 12])
   assert string::contains(text, "import aoc::day01\nimport aoc::day12\nimport aoc::kit\n")
-  assert string::contains(text, "    kit::entry(12, day12::part1, day12::part2),\n")
-  let single = all_module([7])
-  assert string::contains(single, "  kit::run_all([kit::entry(7, day07::part1, day07::part2)])\n")
+  assert string::contains(
+    text,
+    "  kit::run_all([kit::entry(1, day01::main), kit::entry(12, day12::main)])\n",
+  )
+  let many = all_module(list::range(1, 13))
+  assert string::contains(many, "    kit::entry(12, day12::main),\n  ])\n")
+}
+
+test "the last day's skeleton has one part" {
+  let middle = skeleton(3)
+  assert string::contains(middle, "kit::run(3, part1, part2)")
+  assert string::contains(middle, "kit::sample2(3)")
+  assert string::contains(middle, "aoc::day03")
+  let last = skeleton(config::days)
+  let number = int::show(config::days)
+  assert string::contains(last, "kit::run_one(" + number + ", part1)")
+  assert !string::contains(last, "part2")
 }

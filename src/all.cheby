@@ -1,5 +1,5 @@
 //! Runs every day on its real input, with timings: `cheby run aoc::all`.
-//! `cheby run -- new N` and `cheby run -- sync` rewrite this file.
+//! `cheby run -- new N`, `remove N` and `sync` rewrite this file.
 
 import aoc::kit
 

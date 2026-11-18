@@ -1,8 +1,13 @@
-//! Settings for this checkout: the puzzle year, and the User-Agent that
-//! every request to adventofcode.com carries.
+//! Settings for this checkout: the puzzle year, its number of days, and
+//! the User-Agent that every request to adventofcode.com carries.
 
 /// The year of the puzzles this checkout solves.
 pub const year: Int = 2026
+
+/// The number of puzzle days in the year: 12 since 2025, 25 before. The
+/// last day has only part 1, so `cheby run -- new` writes a one-part
+/// skeleton for it.
+pub const days: Int = 12
 
 /// The User-Agent of every request: the tool, then who runs it. Advent of
 /// Code asks automated tools to say how to reach the person sending the

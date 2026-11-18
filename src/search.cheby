@@ -1,5 +1,6 @@
 //! Searches over puzzle states: breadth-first search, Dijkstra's shortest
-//! paths, and finding where a repeated step starts to cycle.
+//! paths, counting the paths of a graph without cycles, finding where a
+//! repeated step starts to cycle, and disjoint sets (union-find).
 //!
 //! A state is any value that `==` and hashing work on, such as a position
 //! `(x, y)` or a record of a position and a direction. `dijkstra` also
@@ -9,6 +10,7 @@ import std::heap
 import std::list
 import std::map
 import std::ops::{Compare}
+import std::option
 
 /// The number of steps from `start` to every state it reaches, where
 /// `next` gives the states one step from a state.
@@ -138,8 +140,7 @@ pub fn state_after<S>(start: S, step: fn(S) -> S, n: Int) -> S {
     True => n
     False => first + (n - first) % length
   }
-  let assert Some(state) = list::get(states, index)
-  state
+  option::expect(list::get(states, index), "the index lies inside the walk")
 }
 
 /// The states from `start` up to the first that repeats, the index of the
@@ -157,6 +158,128 @@ fn walk_to_cycle<S>(start: S, step: fn(S) -> S) -> (List<S>, Int, Int) {
     }
   }
   walk(start, 0, [], map::new())
+}
+
+/// The number of paths from `start` to `goal`, where `next` gives the
+/// states one step from a state. The graph must have no cycles. Each
+/// state's count is computed once and kept in a map, so a graph with
+/// trillions of paths takes as long as one with few.
+pub fn count_paths<S>(start: S, goal: S, next: fn(S) -> List<S>) -> Int {
+  fn count(state: S, known: map::Map<S, Int>) -> (Int, map::Map<S, Int>) {
+    guard state != goal else {
+      (1, known)
+    }
+    case map::get(known, state) {
+      Some(paths) => (paths, known)
+      None => {
+        let (total, filled) = list::fold(next(state), (0, known), fn((sum, seen), to) {
+          let (paths, after) = count(to, seen)
+          (sum + paths, after)
+        })
+        (total, map::insert(filled, state, total))
+      }
+    }
+  }
+  let (paths, _) = count(start, map::new())
+  paths
+}
+
+// Disjoint sets
+
+/// Keys split into disjoint groups, the structure also called union-find.
+/// A key that `union` never joined to another is a group of its own. It is
+/// persistent: `union` returns new sets and leaves the old ones as they
+/// were.
+pub type Sets<K> {
+  /// Each key's parent. A root, the key that names its group, is its own
+  /// parent.
+  parent: map::Map<K, K>,
+  /// The size of each root's group. A root missing here is alone.
+  size: map::Map<K, Int>,
+}
+
+/// Sets in which each of `keys` is a group of its own. `groups` and
+/// `sizes` count these keys, and the keys that `union` adds later.
+pub fn new_sets<K>(keys: List<K>) -> Sets<K> {
+  let parent = list::fold(keys, map::new(), fn(found, key) { map::insert(found, key, key) })
+  Sets { parent, size: map::new() }
+}
+
+/// The root of `key`'s group: two keys are in the same group when their
+/// roots are equal. `find` cannot shorten the path it walks, because that
+/// would change the sets. `union` joins the smaller group under the larger
+/// and shortens the paths it walks, so a path stays short.
+pub fn find<K>(sets: Sets<K>, key: K) -> K {
+  case map::get(sets.parent, key) {
+    Some(up) when up != key => find(sets, up)
+    _ => key
+  }
+}
+
+/// Whether `a` and `b` are in the same group.
+pub fn same<K>(sets: Sets<K>, a: K, b: K) -> Bool {
+  find(sets, a) == find(sets, b)
+}
+
+/// The sets with the groups of `a` and `b` joined into one. Keys that the
+/// sets do not hold yet are added.
+pub fn union<K>(sets: Sets<K>, a: K, b: K) -> Sets<K> {
+  let root_a = find(sets, a)
+  let root_b = find(sets, b)
+  let size_a = group_size(sets, root_a)
+  let size_b = group_size(sets, root_b)
+  let (root, other) = case size_a >= size_b {
+    True => (root_a, root_b)
+    False => (root_b, root_a)
+  }
+  let parent = sets.parent
+    |> point_to(_, a, root)
+    |> point_to(_, b, root)
+  case root == other {
+    True => Sets { ..sets, parent }
+    False => {
+      let size = sets.size
+        |> map::remove(_, other)
+        |> map::insert(_, root, size_a + size_b)
+      Sets { parent, size }
+    }
+  }
+}
+
+/// The size of the group whose root is `root`.
+fn group_size<K>(sets: Sets<K>, root: K) -> Int {
+  map::get_or(sets.size, root, 1)
+}
+
+/// `parent` with every key on the path from `key` to its root pointing
+/// at `root` instead.
+fn point_to<K>(parent: map::Map<K, K>, key: K, root: K) -> map::Map<K, K> {
+  let up = map::get_or(parent, key, key)
+  let pointed = map::insert(parent, key, root)
+  case up == key {
+    True => pointed
+    False => point_to(pointed, up, root)
+  }
+}
+
+/// The groups, each a list of its keys. The order of the groups and of the
+/// keys in a group changes between runs, as a map's order does, so sort
+/// them before printing.
+pub fn groups<K>(sets: Sets<K>) -> List<List<K>> {
+  sets.parent
+  |> map::fold(_, map::new(), fn(found, key, _) {
+    map::upsert(found, find(sets, key), fn(old) { list::push(option::unwrap_or(old, []), key) })
+  })
+  |> map::values
+}
+
+/// The size of every group, largest first.
+pub fn sizes<K>(sets: Sets<K>) -> List<Int> {
+  sets
+  |> groups
+  |> list::map(_, list::length)
+  |> list::sort
+  |> list::reverse
 }
 
 /// A small graph for the tests: each number steps to the next two, and a
@@ -208,4 +331,47 @@ test "a cycle is found and skipped over" {
   assert state_after(0, step, 1) == 1
   assert state_after(0, step, 5) == 2
   assert state_after(0, step, 1_000_000_000) == 4
+}
+
+test "count_paths counts every path of a graph without cycles" {
+  // From n, step to n + 1 and n + 2: the ways to climb 10 stairs.
+  let climb = fn(n) { list::filter([n + 1, n + 2], fn(to) { to <= 10 }) }
+  assert count_paths(0, 10, climb) == 89
+  assert count_paths(3, 3, climb) == 1
+  assert count_paths(0, 11, climb) == 0
+  let long = fn(n) { list::filter([n + 1, n + 2], fn(to) { to <= 90 }) }
+  assert count_paths(0, 90, long) == 4_660_046_610_375_530_309
+}
+
+test "union joins groups and find names them" {
+  let sets = new_sets([1, 2, 3, 4, 5, 6])
+    |> union(_, 1, 2)
+    |> union(_, 3, 4)
+    |> union(_, 2, 4)
+  assert same(sets, 1, 3)
+  assert !same(sets, 1, 5)
+  assert find(sets, 4) == find(sets, 1)
+  assert sizes(sets) == [4, 1, 1]
+  let sorted = sets
+    |> groups
+    |> list::map(_, list::sort)
+    |> list::sort
+  assert sorted == [[1, 2, 3, 4], [5], [6]]
+  // A union of keys that are already together changes no group.
+  assert sizes(union(sets, 4, 1)) == [4, 1, 1]
+  // Keys that the sets do not hold yet are added.
+  let more = union(sets, 7, 8)
+  assert sizes(more) == [4, 2, 1, 1]
+  assert same(more, 8, 7)
+  assert !same(sets, 7, 8)
+}
+
+test "union works on any key" {
+  let cells = new_sets([])
+    |> union(_, (0, 0), (0, 1))
+    |> union(_, (5, 5), (0, 1))
+  assert same(cells, (5, 5), (0, 0))
+  assert sizes(cells) == [3]
+  let names = union(new_sets(["a", "b", "c"]), "c", "a")
+  assert sizes(names) == [2, 1]
 }
